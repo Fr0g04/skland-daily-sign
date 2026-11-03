@@ -1,4 +1,4 @@
-"""Skip the 01:00 China-time retry after a successful scheduled run today."""
+"""Skip the 01:07 China-time retry after a successful scheduled run today."""
 import json
 import os
 from datetime import datetime, time, timedelta, timezone
@@ -6,7 +6,7 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 CHINA = timezone(timedelta(hours=8))
-RETRY_CRON = "0 17 * * *"
+RETRY_CRON = "7 17 * * *"
 
 
 def should_run(event, schedule, runs, current_id, now):
