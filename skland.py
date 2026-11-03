@@ -30,7 +30,14 @@ def request(url, method="POST", body=None, headers=None):
         with urlopen(req, timeout=30) as response:
             result = json.load(response)
     except HTTPError as exc:
-        # 仅显示路径，不显示请求体、响应体或凭据。
+        # 森空岛可能用 HTTP 403 承载「已签到」等业务结果；必须检查 JSON。
+        try:
+            error_result = json.loads(exc.read(65536))
+        except (ValueError, UnicodeError, OSError):
+            error_result = None
+        if isinstance(error_result, dict) and isinstance(error_result.get("code"), int) and error_result["code"] != 0:
+            return error_result
+        # 非业务错误不输出响应体，避免回显凭据。
         raise ApiError(f"接口 {urlsplit(url).path} 返回 HTTP {exc.code}") from None
     except (URLError, TimeoutError, OSError):
         raise ApiError("网络连接失败或超时") from None

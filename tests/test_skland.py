@@ -2,12 +2,35 @@ import hashlib
 import hmac
 import json
 import unittest
+import io
+from urllib.error import HTTPError
 from unittest.mock import patch
 
 import skland
 
 
 class AttendanceTests(unittest.TestCase):
+    def test_http403_repeat_is_recognized(self):
+        response = HTTPError("https://zonai.skland.com/api/v1/game/attendance", 403,
+                             "Forbidden", {}, io.BytesIO(json.dumps({"code": 10001, "message": "请勿重复签到！"}).encode()))
+        with patch("skland.urlopen", side_effect=response):
+            result = skland.request("https://zonai.skland.com/api/v1/game/attendance")
+        self.assertEqual(skland.attendance_ok(result), "今日已签到")
+
+    def test_http403_device_error_is_failure(self):
+        response = HTTPError("https://zonai.skland.com/api/v1/game/attendance", 403,
+                             "Forbidden", {}, io.BytesIO(json.dumps({"code": 10001, "message": "设备信息无效"}).encode()))
+        with patch("skland.urlopen", side_effect=response):
+            result = skland.request("https://zonai.skland.com/api/v1/game/attendance")
+        with self.assertRaises(skland.ApiError):
+            skland.attendance_ok(result)
+
+    def test_http403_html_is_not_success(self):
+        response = HTTPError("https://zonai.skland.com/api/v1/game/attendance", 403,
+                             "Forbidden", {}, io.BytesIO(b"<html>Forbidden</html>"))
+        with patch("skland.urlopen", side_effect=response), self.assertRaises(skland.ApiError):
+            skland.request("https://zonai.skland.com/api/v1/game/attendance")
+
     def test_token_formats(self):
         self.assertEqual(skland.load_tokens('{"code":0,"data":{"content":"sample"}}'), ["sample"])
         self.assertEqual(skland.load_tokens('one\ntwo;three'), ["one", "two", "three"])
