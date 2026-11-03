@@ -24,7 +24,24 @@ jobs:
       - name: 离线测试
         run: python -m unittest discover -s tests -v
       - name: 两个游戏签到
+        id: sign
         env:
           SKLAND_TOKENS: ${{ secrets.SKLAND_TOKENS }}
           SKLAND_DID: ${{ secrets.SKLAND_DID }}
-        run: python skland.py
+        # pipefail 确保脚本失败不会被 tee 掩盖。
+        shell: bash
+        run: |
+          set -o pipefail
+          python -u skland.py 2>&1 | tee sign-result.txt
+      - name: 发送邮件回执
+        if: ${{ always() && !cancelled() }}
+        env:
+          SIGN_OUTCOME: ${{ steps.sign.outcome }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+          SKLAND_TOKENS: ${{ secrets.SKLAND_TOKENS }}
+          SKLAND_DID: ${{ secrets.SKLAND_DID }}
+        run: python notify.py
