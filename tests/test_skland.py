@@ -8,6 +8,13 @@ import skland
 
 
 class AttendanceTests(unittest.TestCase):
+    def test_token_formats(self):
+        self.assertEqual(skland.load_tokens('{"code":0,"data":{"content":"sample"}}'), ["sample"])
+        self.assertEqual(skland.load_tokens('one\ntwo;three'), ["one", "two", "three"])
+        self.assertEqual(skland.load_tokens('["one","two"]'), ["one", "two"])
+        with self.assertRaises(skland.ApiError):
+            skland.load_tokens('{"wrong":"format"}')
+
     def test_signature_wire_contract(self):
         body = '{"uid":"123","gameId":"1"}'
         headers = skland.signature("test-key", "/api/v1/game/attendance", body, timestamp=1700000000)

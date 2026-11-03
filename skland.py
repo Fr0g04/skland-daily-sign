@@ -8,6 +8,7 @@ import sys
 import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from urllib.parse import urlsplit
 
 BASE = "https://zonai.skland.com"
 UA = "Skland/1.5.1 (com.hypergryph.skland; Android 34)"
@@ -29,7 +30,8 @@ def request(url, method="POST", body=None, headers=None):
         with urlopen(req, timeout=30) as response:
             result = json.load(response)
     except HTTPError as exc:
-        raise ApiError(f"HTTP {exc.code}") from None
+        # 仅显示路径，不显示请求体、响应体或凭据。
+        raise ApiError(f"接口 {urlsplit(url).path} 返回 HTTP {exc.code}") from None
     except (URLError, TimeoutError, OSError):
         raise ApiError("网络连接失败或超时") from None
     except (ValueError, UnicodeError):
@@ -120,8 +122,28 @@ def attendance_ok(result):
     raise ApiError(f"签到失败，code={result.get('code')}；请检查凭据、设备信息或接口变更")
 
 
+def load_tokens(raw):
+    raw = raw.strip()
+    if raw.startswith(("{", "[", '"')):
+        try:
+            value = json.loads(raw)
+            if isinstance(value, dict):
+                value = value["data"]["content"]
+            values = value if isinstance(value, list) else [value]
+            if not values or not all(isinstance(t, str) and t.strip() for t in values):
+                raise ValueError()
+            return [t.strip() for t in values]
+        except (ValueError, KeyError, TypeError):
+            raise ApiError("SKLAND_TOKENS 格式错误：请填写 data.content 字段值，或完整的官方 JSON 响应") from None
+    return [x.strip() for x in re.split(r"[\n,;]+", raw) if x.strip()]
+
+
 def main():
-    tokens = [x.strip() for x in re.split(r"[\n,;]+", os.getenv("SKLAND_TOKENS", "")) if x.strip()]
+    try:
+        tokens = load_tokens(os.getenv("SKLAND_TOKENS", ""))
+    except ApiError as exc:
+        print(str(exc))
+        return 1
     if not tokens:
         print("失败：请设置仓库 Secret SKLAND_TOKENS（鹰角通行证 Token）")
         return 1
