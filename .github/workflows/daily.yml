@@ -1,0 +1,30 @@
+name: 森空岛每日签到
+on:
+  schedule:
+    # UTC，对应北京时间每天 08:17；12:47 再执行一次补签。
+    - cron: '17 0 * * *'
+    - cron: '47 4 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: skland-daily
+  cancel-in-progress: false
+jobs:
+  attendance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 离线测试
+        run: python -m unittest discover -s tests -v
+      - name: 两个游戏签到
+        env:
+          SKLAND_TOKENS: ${{ secrets.SKLAND_TOKENS }}
+          SKLAND_DID: ${{ secrets.SKLAND_DID }}
+        run: python skland.py
