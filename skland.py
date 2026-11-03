@@ -163,8 +163,8 @@ def main():
                     else:
                         result = client.call("/api/v1/game/attendance", {"uid": a, "gameId": b})
                     print(f"{label}：{attendance_ok(result)}")
-                except (ApiError, KeyError, TypeError):
-                    print(f"{label}：签到失败，请检查接口或凭据")
+                except (ApiError, KeyError, TypeError) as exc:
+                    print(f"{label}：{exc if isinstance(exc, ApiError) else '接口数据格式异常'}")
                     failed = True
                 time.sleep(2)
         except (ApiError, KeyError, TypeError) as exc:
