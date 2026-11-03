@@ -1,8 +1,8 @@
 name: 森空岛每日签到
 on:
   schedule:
-    # UTC，对应北京时间每天 08:17；12:47 再执行一次补签。
-    - cron: '17 0 * * *'
+    # UTC，对应北京时间每天 00:00；12:47 再执行一次补签。
+    - cron: '0 16 * * *'
     - cron: '47 4 * * *'
   workflow_dispatch:
 permissions:
