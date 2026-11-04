@@ -1,0 +1,17 @@
+name: Scheduler diagnostic only
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+permissions: {}
+jobs:
+  observe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Print scheduled event without account access
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          printf 'event=%s schedule=%s\n' "$EVENT_NAME" "$SCHEDULE"
+          date -u
