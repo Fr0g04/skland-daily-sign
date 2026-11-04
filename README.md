@@ -2,6 +2,7 @@
 
 Python 标准库实现，支持明日方舟、明日方舟：终末地的全部已绑定角色。
 不包含游戏内每日任务或森空岛社区登岛积分检票。
+[![森空岛每日签到](https://github.com/Fr0g04/skland-daily-sign/actions/workflows/daily.yml/badge.svg)](https://github.com/Fr0g04/skland-daily-sign/actions/workflows/daily.yml)
 
 ## GitHub 部署
 
