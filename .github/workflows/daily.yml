@@ -4,6 +4,8 @@ on:
     # UTC，对应北京时间每天 00:07；01:07 按首次运行结果决定是否补签。
     - cron: '7 16 * * *'
     - cron: '7 17 * * *'
+    # Temporary schedule-only probe; does not access account secrets.
+    - cron: '*/5 * * * *'
   workflow_dispatch:
 permissions:
   contents: read
@@ -13,6 +15,7 @@ concurrency:
   cancel-in-progress: false
 jobs:
   attendance:
+    if: github.event_name != 'schedule' || github.event.schedule != '*/5 * * * *'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -54,3 +57,17 @@ jobs:
           SKLAND_TOKENS: ${{ secrets.SKLAND_TOKENS }}
           SKLAND_DID: ${{ secrets.SKLAND_DID }}
         run: python notify.py
+
+  schedule-probe:
+    if: github.event_name == 'schedule' && github.event.schedule == '*/5 * * * *'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions: {}
+    steps:
+      - name: Verify scheduler only
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          printf 'event=%s schedule=%s\n' "$EVENT_NAME" "$SCHEDULE"
+          date -u
