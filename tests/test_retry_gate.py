@@ -1,7 +1,7 @@
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from retry_gate import already_done, CHINA
+from retry_gate import already_done, decide, CHINA, FALSE, TRUE, UNKNOWN
 
 
 class RetryGateTests(unittest.TestCase):
@@ -48,6 +48,24 @@ class RetryGateTests(unittest.TestCase):
 
     def test_china_timezone_is_utc_plus_8(self):
         self.assertEqual(CHINA.utcoffset(None), timedelta(hours=8))
+
+
+class DecideTests(unittest.TestCase):
+    """签到决策：force 只影响签到，already 的事实判定不受影响。"""
+
+    def test_runs_when_not_done_today(self):
+        self.assertTrue(decide(FALSE, False))
+
+    def test_skips_when_already_done(self):
+        self.assertFalse(decide(TRUE, False))
+
+    def test_query_failure_fails_open(self):
+        # 查询失败（unknown）时继续签到：宁可重复签到，也不漏签。
+        self.assertTrue(decide(UNKNOWN, False))
+
+    def test_force_runs_even_when_already_done(self):
+        # force 只让签到跑起来，already 仍然是 true，邮件步骤据此跳过回执。
+        self.assertTrue(decide(TRUE, True))
 
 
 if __name__ == "__main__":
