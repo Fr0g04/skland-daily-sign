@@ -1,13 +1,18 @@
 """Send attendance receipts over authenticated TLS SMTP.
 
-改动：新增"当天首次成功才发回执"的判断。
-签到本身是幂等的，重复执行无害；但重复执行会产生重复邮件，所以在这里做去重。
-判断放在发信之前而不是 workflow 的 if 里，是为了让"只发一封"不依赖门禁是否可靠：
-即使门禁因为查询失败而 fail-open 放行了第二次执行，这里仍然只会发一封。
-失败告警不受影响，一律发送。
+去重规则：**每天只发一封成功回执**；失败告警一律发送。
+
+判定不再由本文件去查 Actions API（那会形成第二份实现，与门禁悄悄不一致），
+而是看两件事，任一成立就跳过：
+
+1. 门禁给出的裁决 ALREADY_TODAY=true —— 今天已有成功运行；
+2. 状态文件 .state/last-receipt.txt 记录的就是今天 —— 上一封已经发过了。
+
+第 2 条不依赖网络、不依赖权限，由本脚本写入、由心跳步骤提交进仓库，
+所以即使门禁查询失败（fail-open 放行），也不会发出第二封。
+无法判定时不拦截：宁可多发一封，也不要漏掉告警。
 """
 
-import json
 import os
 import re
 import smtplib
@@ -16,71 +21,64 @@ import sys
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
 
 CHINA = timezone(timedelta(hours=8))
 
+# 可用 NOTIFY_STATE_FILE 覆盖；单元测试指向临时文件，避免污染仓库。
+STATE_FILE = Path(os.getenv("NOTIFY_STATE_FILE", ".state/last-receipt.txt"))
 
-def is_first_success_today():
-    """今天（UTC+8）本次是否为第一个成功运行。
 
-    返回 True 表示应当发送。查询不到时返回 True（fail-open）：
-    宁可偶尔多发一封，也不要漏掉告警。
-    """
-    token = os.getenv("GITHUB_TOKEN", "").strip()
-    repo = os.getenv("GITHUB_REPOSITORY", "").strip()
-    run_id = os.getenv("GITHUB_RUN_ID", "").strip()
-    branch = os.getenv("GITHUB_REF_NAME", "").strip()
-    # 本地运行（含单元测试）直接放行，不做网络请求，保证测试是封闭的。
-    if os.getenv("GITHUB_ACTIONS") != "true":
-        return True
-    if not (token and repo and run_id):
-        return True  # 缺少上下文，不拦截
-
-    now = datetime.now(timezone.utc)
-    midnight = datetime.combine(now.astimezone(CHINA).date(), datetime.min.time(), CHINA)
-    query = {
-        "status": "success",
-        "per_page": 100,
-        "created": ">=" + midnight.astimezone(timezone.utc).isoformat(),
-    }
-    if branch:
-        query["branch"] = branch
-
+def write_output(name, value):
+    path = os.getenv("GITHUB_OUTPUT")
+    if not path:
+        return
     try:
-        for page in range(1, 6):
-            query["page"] = page
-            url = (
-                "https://api.github.com/repos/"
-                + repo
-                + "/actions/workflows/daily.yml/runs?"
-                + urlencode(query)
-            )
-            req = Request(
-                url,
-                headers={
-                    "Authorization": "Bearer " + token,
-                    "Accept": "application/vnd.github+json",
-                    "User-Agent": "skland-notify",
-                },
-            )
-            with urlopen(req, timeout=20) as response:
-                batch = json.load(response)["workflow_runs"]
-            for run in batch:
-                if str(run.get("id")) == run_id:
-                    continue
-                if run.get("conclusion") != "success":
-                    continue
-                created = datetime.fromisoformat(run["created_at"].replace("Z", "+00:00"))
-                if created.astimezone(CHINA).date() == now.astimezone(CHINA).date():
-                    return False
-            if len(batch) < 100:
-                break
+        with open(path, "a", encoding="utf-8") as output:
+            output.write("%s=%s\n" % (name, value))
+    except Exception:
+        pass
+
+
+def read_state():
+    try:
+        return STATE_FILE.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
+
+
+def mark_sent(stamp):
+    """记录「今天已发过回执」。心跳步骤会把这个文件提交进仓库。"""
+    try:
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        STATE_FILE.write_text(stamp + "\n", encoding="utf-8")
     except Exception as exc:
-        print("无法查询当天运行记录（%s），按首次成功处理。" % exc)
-        return True
-    return True
+        print("无法写入回执状态文件（%s），下次可能重复发信。" % exc)
+
+
+def dedup_enabled():
+    """去重是否启用。
+
+    只有 workflow 显式注入 ALREADY_TODAY 时才启用。这样即使升级过程中
+    旧版测试文件还没换掉（它不会设这个变量），离线测试也不会在仓库里
+    写出 .state/last-receipt.txt 而把当天回执静音。
+    """
+    return os.getenv("ALREADY_TODAY") is not None
+
+
+def skip_reason(now):
+    """非空字符串表示今天已经发过成功回执，应当跳过本次发送。"""
+    if not dedup_enabled():
+        return ""
+    verdict = os.getenv("ALREADY_TODAY", "").strip().lower()
+    if verdict == "true":
+        return "gate:今天已有成功运行"
+    today = now.astimezone(CHINA).date().isoformat()
+    state = read_state()
+    if state:
+        first = state.split()[0]
+        if first == today:
+            return "state:回执状态文件=%s" % first
+    return ""
 
 
 def send_receipt():
@@ -93,11 +91,15 @@ def send_receipt():
         print("邮件配置不完整：请检查四项必填 Secrets。")
         return 1
 
+    now = datetime.now(timezone.utc)
     success = os.getenv("SIGN_OUTCOME") == "success"
-    # 只有"成功回执"需要去重；失败告警一律发送。
-    if success and not is_first_success_today():
-        print("今天已有更早的成功运行，本次不再重复发送回执。")
-        return 0
+    # 只有成功回执做去重；失败告警一律发送。
+    if success:
+        reason = skip_reason(now)
+        if reason:
+            print("DEDUP=skipped reason=%s" % reason)
+            write_output("mail", "skipped")
+            return 0
 
     try:
         port = int(os.getenv("SMTP_PORT", "").strip() or "465")
@@ -107,7 +109,7 @@ def send_receipt():
         if not recipients:
             raise ValueError("收件人为空")
         status = "签到成功／今日已签到" if success else "执行失败或未完成，请检查"
-        now = datetime.now(CHINA).strftime("%Y-%m-%d %H:%M:%S")
+        stamp = now.astimezone(CHINA).strftime("%Y-%m-%d %H:%M:%S")
         report_path = Path("sign-result.txt")
         report = report_path.read_text(encoding="utf-8")[:16000] if report_path.exists() else "没有签到结果，可能在准备或测试步骤失败。"
         # 不允许把已知凭据放进回执。
@@ -121,10 +123,10 @@ def send_receipt():
         run_id = os.getenv("GITHUB_RUN_ID", "")
         link = f"https://github.com/{repo}/actions/runs/{run_id}" if repo and run_id else "本地运行"
         message = EmailMessage()
-        message["Subject"] = f"【森空岛】{status} · {now[:10]}"
+        message["Subject"] = f"【森空岛】{status} · {stamp[:10]}"
         message["From"] = values["SMTP_USER"]
         message["To"] = ", ".join(recipients)
-        message.set_content(f"北京时间：{now}\n结果：{status}\n\n{report}\n\n运行详情：{link}\n")
+        message.set_content(f"北京时间：{stamp}\n结果：{status}\n\n{report}\n\n运行详情：{link}\n")
         context = ssl.create_default_context()
         if port == 465:
             connection = smtplib.SMTP_SSL(values["SMTP_HOST"], port, timeout=30, context=context)
@@ -138,6 +140,16 @@ def send_receipt():
             smtp.login(values["SMTP_USER"], values["SMTP_PASSWORD"])
             smtp.send_message(message, to_addrs=recipients)
         print("邮件回执已提交到 SMTP 服务器。")
+        if success:
+            if dedup_enabled():
+                mark_sent(now.astimezone(CHINA).date().isoformat())
+                print("DEDUP=sent 已记录今日回执状态")
+            else:
+                print("DEDUP=sent 未启用去重（无 ALREADY_TODAY）")
+            write_output("mail", "sent")
+        else:
+            print("DEDUP=sent 失败告警不参与去重")
+            write_output("mail", "alert")
         return 0
     except Exception:
         # SMTP 异常可能含账号、收件人或服务器响应，不直接打印。
