@@ -1,13 +1,15 @@
-"""Gate: 当天已有成功运行则跳过。
+"""Gate: 判定「今天是否已经成功签到过」，并把判定结果显式交出去。
 
-让 GitHub cron、云端定时任务、手动触发这三个来源互相幂等：
-任何一个先把今天的签到跑成功，其余触发都会自动跳过，不会重复签到。
+三个触发源（GitHub cron、云端定时任务、手动）都先过这道门：
+今天已成功就跳过，重复触发因此是安全的。
 
-与原版差异：
-- 原版只在 event=schedule 且 schedule=RETRY_CRON 时才去重，而且只认 event=schedule 的成功记录。
-  现在无论哪种触发，都检查"今天是否已有成功运行"，多触发源从此安全叠加。
-- 手动触发可通过 force 输入强制运行，方便调试。
-- 查询失败时 fail-open（继续签到），宁可重复也不漏签。
+相对上一版的关键改动：
+- already 无论 force 与否都会计算一次并输出。force 只改变「要不要签到」，
+  不改变「今天是否已有成功」这个事实，而邮件去重要用后者。
+- 「今天有没有成功过」从此只查一次（本文件），邮件步骤直接复用这里的裁决，
+  不再各自实现一份查询——两份实现悄悄不一致是上一版最难查的地方。
+- 判定结果写进 GITHUB_OUTPUT（run / already），同时写进 Step Summary，
+  运行页面上一眼可见，不需要下载日志。
 """
 
 import json
@@ -17,6 +19,9 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 CHINA = timezone(timedelta(hours=8))
+TRUE = "true"
+FALSE = "false"
+UNKNOWN = "unknown"
 
 
 def already_done(runs, current_id, now):
@@ -66,23 +71,73 @@ def fetch_today_success_runs(now):
     return runs
 
 
+def decide(already, force):
+    """是否需要执行签到。
+
+    already=unknown（查询失败）时 fail-open：宁可重复签到，也不漏签。
+    force 只影响签到，不影响 already 的事实判定（邮件去重要用后者）。
+    """
+    if force:
+        return True
+    return already != TRUE
+
+
+def write_output(name, value):
+    """写 GITHUB_OUTPUT；本地运行没有该变量时只打印。"""
+    path = os.getenv("GITHUB_OUTPUT")
+    if not path:
+        print("（本地运行，无 GITHUB_OUTPUT）%s=%s" % (name, value))
+        return
+    with open(path, "a", encoding="utf-8") as output:
+        output.write("%s=%s\n" % (name, value))
+
+
+def write_summary(lines):
+    path = os.getenv("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    try:
+        with open(path, "a", encoding="utf-8") as summary:
+            summary.write("\n".join(lines) + "\n")
+    except Exception as exc:  # 摘要写失败不影响主流程
+        print("写入 Step Summary 失败（%s）。" % exc)
+
+
 def main():
     now = datetime.now(timezone.utc)
     force = str(os.getenv("FORCE_RUN", "")).strip().lower() == "true"
+    checked = ""
+    already = UNKNOWN
+
+    try:
+        runs = fetch_today_success_runs(now)
+        already = TRUE if already_done(runs, os.environ.get("GITHUB_RUN_ID", ""), now) else FALSE
+        checked = "今日成功记录 %d 条" % len(runs)
+    except Exception as exc:
+        checked = "查询失败：%s" % exc
+        print("无法查询当天运行结果（%s），already=unknown，按未签到处理以免漏签。" % exc)
 
     if force:
-        execute = True
         print("force=true，忽略当天是否已成功。")
-    else:
-        execute = True
-        try:
-            execute = not already_done(fetch_today_success_runs(now), os.environ["GITHUB_RUN_ID"], now)
-        except Exception as exc:
-            print("无法查询当天运行结果（%s），继续签到以免漏签。" % exc)
+    execute = decide(already, force)
 
+    print("GATE run=%s already=%s 依据=%s" % (str(execute).lower(), already, checked or "-"))
     print("继续执行签到。" if execute else "今天已签到成功，本次跳过。")
-    with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-        output.write("run=" + str(execute).lower() + "\n")
+
+    write_output("run", str(execute).lower())
+    write_output("already", already)
+    write_summary(
+        [
+            "### 门禁判定",
+            "",
+            "| 项 | 值 |",
+            "| --- | --- |",
+            "| 今天是否已有成功运行 | `%s` |" % already,
+            "| 本次是否执行签到 | `%s` |" % str(execute).lower(),
+            "| force | `%s` |" % str(force).lower(),
+            "| 依据 | %s |" % (checked or "-"),
+        ]
+    )
 
 
 if __name__ == "__main__":
