@@ -37,6 +37,13 @@ jobs:
   attendance:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      # 这两个值只在 workflow_dispatch 下才可能为 true。
+      # schedule 事件里 github.event.inputs 整个不存在，直接用它会得到空字符串——
+      # 虽然空字符串不等于 "true"、结果碰巧正确，但那是"碰巧"，不是"保证"。
+      # 这里显式绑定事件类型，把"碰巧正确"变成"必然正确"。
+      IS_TEST_MAIL: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.test_mail == 'true' }}
+      FORCE_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.force == 'true' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,7 +56,8 @@ jobs:
       # 只验证 SMTP 配置：发一封测试信，不签到、不去重、不写状态文件。
       # 注意不传 ALREADY_TODAY，因此 notify.py 的去重逻辑不会启用。
       - name: 邮件配置自检
-        if: ${{ github.event.inputs.test_mail == 'true' }}
+        id: selftest
+        if: ${{ env.IS_TEST_MAIL == 'true' }}
         env:
           SIGN_OUTCOME: success
           NOTIFY_TEST: '1'
@@ -65,11 +73,10 @@ jobs:
       - name: 检查今天是否已签到
         id: gate
         # 邮件自检模式下跳过门禁，避免顺带真跑一次签到。
-        if: ${{ github.event.inputs.test_mail != 'true' }}
+        if: ${{ env.IS_TEST_MAIL != 'true' }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SCHEDULE: ${{ github.event.schedule }}
-          FORCE_RUN: ${{ github.event.inputs.force }}
         run: python retry_gate.py
 
       - name: 离线测试
@@ -115,14 +122,22 @@ jobs:
           GATE_RUN: ${{ steps.gate.outputs.run }}
           GATE_ALREADY: ${{ steps.gate.outputs.already }}
           SIGN_OUTCOME: ${{ steps.sign.outcome }}
-          MAIL_OUTCOME: ${{ steps.mail.outputs.mail }}
+          # 自检与正式回执走同一个输出键：取非空的那个。
+          # 于是 mail=sent 就一定代表"真的发出去了"，未配置 SMTP 时是 none，不会伪装成成功。
+          MAIL_OUTCOME: ${{ steps.mail.outputs.mail || steps.selftest.outputs.mail }}
+          # 把 inputs 的实际取值一并落盘。这样"schedule 到底有没有带上 force"
+          # 不需要读日志、不需要推断，看这一行就能确认。
+          FORCE_VALUE: ${{ env.FORCE_RUN }}
+          TEST_VALUE: ${{ env.IS_TEST_MAIL }}
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p .state
-          printf '%s event=%s gate=%s already=%s sign=%s mail=%s\n' \
+          printf '%s event=%s force=%s test=%s gate=%s already=%s sign=%s mail=%s\n' \
             "$(date -u +%FT%TZ)" \
             "${GITHUB_EVENT_NAME}" \
+            "${FORCE_VALUE:-none}" \
+            "${TEST_VALUE:-none}" \
             "${GATE_RUN:-none}" \
             "${GATE_ALREADY:-none}" \
             "${SIGN_OUTCOME:-none}" \
@@ -133,6 +148,9 @@ jobs:
             echo ""
             echo "| 环节 | 结果 |"
             echo "| --- | --- |"
+            echo "| 触发方式 | \`${GITHUB_EVENT_NAME}\` |"
+            echo "| force | \`${FORCE_VALUE:-none}\` |"
+            echo "| test_mail | \`${TEST_VALUE:-none}\` |"
             echo "| 今天是否已有成功运行 | \`${GATE_ALREADY:-none}\` |"
             echo "| 是否执行签到 | \`${GATE_RUN:-none}\` |"
             echo "| 签到结果 | \`${SIGN_OUTCOME:-none}\` |"
