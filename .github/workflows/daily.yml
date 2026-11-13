@@ -12,6 +12,10 @@ on:
         description: '强制签到（忽略今天是否已成功）'
         type: boolean
         default: false
+      test_mail:
+        description: '只测邮件：发一封测试信，不签到、不去重'
+        type: boolean
+        default: false
   schedule:
     # 北京时间 00:05 —— 主触发。GitHub 的 cron 有 5~20 分钟延迟，属正常。
     # 注意：如果游戏的每日重置晚于这个时间，把这里往后挪，并同步修改下方说明。
@@ -42,8 +46,26 @@ jobs:
         with:
           python-version: '3.12'
 
+      # 只验证 SMTP 配置：发一封测试信，不签到、不去重、不写状态文件。
+      # 注意不传 ALREADY_TODAY，因此 notify.py 的去重逻辑不会启用。
+      - name: 邮件配置自检
+        if: ${{ github.event.inputs.test_mail == 'true' }}
+        env:
+          SIGN_OUTCOME: success
+          NOTIFY_TEST: '1'
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+          SKLAND_TOKENS: ${{ secrets.SKLAND_TOKENS }}
+          SKLAND_DID: ${{ secrets.SKLAND_DID }}
+        run: python notify.py
+
       - name: 检查今天是否已签到
         id: gate
+        # 邮件自检模式下跳过门禁，避免顺带真跑一次签到。
+        if: ${{ github.event.inputs.test_mail != 'true' }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
           SCHEDULE: ${{ github.event.schedule }}
