@@ -32,8 +32,11 @@ def is_first_success_today():
     repo = os.getenv("GITHUB_REPOSITORY", "").strip()
     run_id = os.getenv("GITHUB_RUN_ID", "").strip()
     branch = os.getenv("GITHUB_REF_NAME", "").strip()
+    # 本地运行（含单元测试）直接放行，不做网络请求，保证测试是封闭的。
+    if os.getenv("GITHUB_ACTIONS") != "true":
+        return True
     if not (token and repo and run_id):
-        return True  # 本地运行或缺少上下文，不拦截
+        return True  # 缺少上下文，不拦截
 
     now = datetime.now(timezone.utc)
     midnight = datetime.combine(now.astimezone(CHINA).date(), datetime.min.time(), CHINA)
