@@ -93,8 +93,9 @@ def send_receipt():
 
     now = datetime.now(timezone.utc)
     success = os.getenv("SIGN_OUTCOME") == "success"
-    # 只有成功回执做去重；失败告警一律发送。
-    if success:
+    test_mode = os.getenv("NOTIFY_TEST") == "1"
+    # 只有成功回执做去重；失败告警和配置自检一律发送。
+    if success and not test_mode:
         reason = skip_reason(now)
         if reason:
             print("DEDUP=skipped reason=%s" % reason)
@@ -108,10 +109,20 @@ def send_receipt():
         recipients = [x.strip() for x in values["MAIL_TO"].split(",") if x.strip()]
         if not recipients:
             raise ValueError("收件人为空")
-        status = "签到成功／今日已签到" if success else "执行失败或未完成，请检查"
+        if test_mode:
+            status = "邮件配置自检（测试，非真实签到）"
+        elif success:
+            status = "签到成功／今日已签到"
+        else:
+            status = "执行失败或未完成，请检查"
         stamp = now.astimezone(CHINA).strftime("%Y-%m-%d %H:%M:%S")
         report_path = Path("sign-result.txt")
-        report = report_path.read_text(encoding="utf-8")[:16000] if report_path.exists() else "没有签到结果，可能在准备或测试步骤失败。"
+        if report_path.exists():
+            report = report_path.read_text(encoding="utf-8")[:16000]
+        elif test_mode:
+            report = "这条邮件只用于验证 SMTP 配置是否可用，不代表签到结果。"
+        else:
+            report = "没有签到结果，可能在准备或测试步骤失败。"
         # 不允许把已知凭据放进回执。
         sensitive = [values["SMTP_PASSWORD"], values["SMTP_USER"],
                      os.getenv("SKLAND_DID", "")]
@@ -141,11 +152,11 @@ def send_receipt():
             smtp.send_message(message, to_addrs=recipients)
         print("邮件回执已提交到 SMTP 服务器。")
         if success:
-            if dedup_enabled():
+            if dedup_enabled() and not test_mode:
                 mark_sent(now.astimezone(CHINA).date().isoformat())
                 print("DEDUP=sent 已记录今日回执状态")
             else:
-                print("DEDUP=sent 未启用去重（无 ALREADY_TODAY）")
+                print("DEDUP=sent 未启用去重（无 ALREADY_TODAY 或自检模式）")
             write_output("mail", "sent")
         else:
             print("DEDUP=sent 失败告警不参与去重")
