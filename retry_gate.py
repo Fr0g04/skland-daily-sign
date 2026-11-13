@@ -105,7 +105,12 @@ def write_summary(lines):
 
 def main():
     now = datetime.now(timezone.utc)
-    force = str(os.getenv("FORCE_RUN", "")).strip().lower() == "true"
+    # 只有明确的 "true" 才算强制。schedule 事件下 FORCE_RUN 会是 "false"，
+    # 若 workflow 没有传这个变量则为空字符串——两种都落到 force=False。
+    raw_force = os.getenv("FORCE_RUN", "")
+    force = str(raw_force).strip().lower() == "true"
+    event = os.getenv("GITHUB_EVENT_NAME", "") or "-"
+    print("FORCE_RUN=%r event=%s -> force=%s" % (raw_force, event, str(force).lower()))
     checked = ""
     already = UNKNOWN
 
@@ -134,6 +139,7 @@ def main():
             "| --- | --- |",
             "| 今天是否已有成功运行 | `%s` |" % already,
             "| 本次是否执行签到 | `%s` |" % str(execute).lower(),
+            "| 触发方式 | `%s` |" % event,
             "| force | `%s` |" % str(force).lower(),
             "| 依据 | %s |" % (checked or "-"),
         ]
