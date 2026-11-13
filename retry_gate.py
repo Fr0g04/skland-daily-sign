@@ -1,89 +1,54 @@
-"""Gate: 当天已有成功运行则跳过。
+import unittest
+from datetime import datetime, timedelta, timezone
 
-让 GitHub cron、云端定时任务、手动触发这三个来源互相幂等：
-任何一个先把今天的签到跑成功，其余触发都会自动跳过，不会重复签到。
-
-与原版差异：
-- 原版只在 event=schedule 且 schedule=RETRY_CRON 时才去重，而且只认 event=schedule 的成功记录。
-  现在无论哪种触发，都检查"今天是否已有成功运行"，多触发源从此安全叠加。
-- 手动触发可通过 force 输入强制运行，方便调试。
-- 查询失败时 fail-open（继续签到），宁可重复也不漏签。
-"""
-
-import json
-import os
-from datetime import datetime, timezone, timedelta
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
-
-CHINA = timezone(timedelta(hours=8))
+from retry_gate import already_done, CHINA
 
 
-def already_done(runs, current_id, now):
-    """今天（UTC+8）是否已有一次成功运行（排除自己）。"""
-    today = now.astimezone(CHINA).date()
-    for run in runs:
-        if str(run.get("id")) == str(current_id):
-            continue
-        if run.get("conclusion") != "success":
-            continue
-        created = datetime.fromisoformat(run["created_at"].replace("Z", "+00:00"))
-        if created.astimezone(CHINA).date() == today and created <= now:
-            return True
-    return False
+class RetryGateTests(unittest.TestCase):
+    """门禁的新语义：不分触发方式，只要今天（UTC+8）已有成功运行就跳过。"""
 
+    # 北京时间 2026-11-04 01:07 = UTC 11-03 17:07
+    now = datetime(2026, 11, 3, 17, 7, tzinfo=timezone.utc)
 
-def fetch_today_success_runs(now):
-    midnight = datetime.combine(now.astimezone(CHINA).date(), datetime.min.time(), CHINA)
-    query = {
-        "status": "success",
-        "per_page": 100,
-        "branch": os.environ["GITHUB_REF_NAME"],
-        "created": ">=" + midnight.astimezone(timezone.utc).isoformat(),
-    }
-    runs = []
-    for page in range(1, 11):
-        query["page"] = page
-        url = (
-            "https://api.github.com/repos/"
-            + os.environ["GITHUB_REPOSITORY"]
-            + "/actions/workflows/daily.yml/runs?"
-            + urlencode(query)
-        )
-        req = Request(
-            url,
-            headers={
-                "Authorization": "Bearer " + os.environ["GITHUB_TOKEN"],
-                "Accept": "application/vnd.github+json",
-                "User-Agent": "skland-gate",
-            },
-        )
-        with urlopen(req, timeout=20) as response:
-            batch = json.load(response)["workflow_runs"]
-        runs.extend(batch)
-        if len(batch) < 100:
-            break
-    return runs
+    def record(self, conclusion="success", created="2026-11-03T16:07:00Z",
+               run_id=1, event="schedule"):
+        return {"id": run_id, "conclusion": conclusion, "created_at": created, "event": event}
 
+    def test_same_china_day_success_skips(self):
+        self.assertTrue(already_done([self.record()], 2, self.now))
 
-def main():
-    now = datetime.now(timezone.utc)
-    force = str(os.getenv("FORCE_RUN", "")).strip().lower() == "true"
+    def test_no_run_does_not_skip(self):
+        self.assertFalse(already_done([], 2, self.now))
 
-    if force:
-        execute = True
-        print("force=true，忽略当天是否已成功。")
-    else:
-        execute = True
-        try:
-            execute = not already_done(fetch_today_success_runs(now), os.environ["GITHUB_RUN_ID"], now)
-        except Exception as exc:
-            print("无法查询当天运行结果（%s），继续签到以免漏签。" % exc)
+    def test_failure_or_incomplete_does_not_skip(self):
+        for conclusion in ("failure", "cancelled", "skipped", None):
+            with self.subTest(conclusion=conclusion):
+                self.assertFalse(already_done([self.record(conclusion)], 2, self.now))
 
-    print("继续执行签到。" if execute else "今天已签到成功，本次跳过。")
-    with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
-        output.write("run=" + str(execute).lower() + "\n")
+    def test_previous_china_day_does_not_skip(self):
+        # UTC 11-03 15:59:59 = 北京 11-03 23:59:59，属于"昨天"
+        self.assertFalse(already_done([self.record(created="2026-11-03T15:59:59Z")], 2, self.now))
+
+    def test_china_midnight_boundary_counts(self):
+        # UTC 11-03 16:00:00 = 北京 11-04 00:00:00，属于"今天"
+        self.assertTrue(already_done([self.record(created="2026-11-03T16:00:00Z")], 2, self.now))
+
+    def test_current_run_not_counted(self):
+        self.assertFalse(already_done([self.record(run_id=2)], 2, self.now))
+
+    def test_any_trigger_event_counts(self):
+        # 与旧版不同：手动触发的成功运行同样会挡住后续触发。
+        for event in ("workflow_dispatch", "schedule"):
+            with self.subTest(event=event):
+                self.assertTrue(already_done([self.record(event=event)], 2, self.now))
+
+    def test_future_run_does_not_count(self):
+        # 创建时间晚于当前时刻（时钟异常）不应被当作"今天已成功"
+        self.assertFalse(already_done([self.record(created="2026-11-03T20:00:00Z")], 2, self.now))
+
+    def test_china_timezone_is_utc_plus_8(self):
+        self.assertEqual(CHINA.utcoffset(None), timedelta(hours=8))
 
 
 if __name__ == "__main__":
-    main()
+    unittest.main()
