@@ -67,12 +67,13 @@ jobs:
           python -u skland.py 2>&1 | tee sign-result.txt
 
       - name: 发送邮件回执
+        id: mail
         if: ${{ always() && !cancelled() && steps.gate.outputs.run == 'true' }}
         env:
           SIGN_OUTCOME: ${{ steps.sign.outcome }}
-          # notify.py 用它查询"今天是否已有更早的成功运行"，据此只发第一封回执。
-          # 需要 workflow 级 permissions: actions: read 已开启。
-          GITHUB_TOKEN: ${{ github.token }}
+          # 门禁的裁决直接传进来，notify.py 不再自己查 API——
+          # 一处事实只查一次，避免两份实现悄悄不一致。
+          ALREADY_TODAY: ${{ steps.gate.outputs.already }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           SMTP_PORT: ${{ secrets.SMTP_PORT }}
           SMTP_USER: ${{ secrets.SMTP_USER }}
@@ -83,22 +84,42 @@ jobs:
         run: python notify.py
 
       # 每天落一次提交，让仓库保持"有活动"状态，防止 cron 被自动禁用。
+      # 同时把本次的判定结果写进 .state/，这是唯一不依赖日志的可观测通道。
       # continue-on-error 保证它失败也不会把签到任务带红。
       - name: 心跳提交
         if: ${{ always() }}
         continue-on-error: true
+        env:
+          GATE_RUN: ${{ steps.gate.outputs.run }}
+          GATE_ALREADY: ${{ steps.gate.outputs.already }}
+          SIGN_OUTCOME: ${{ steps.sign.outcome }}
+          MAIL_OUTCOME: ${{ steps.mail.outputs.mail }}
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p .state
-          printf '%s event=%s gate=%s sign=%s\n' \
+          printf '%s event=%s gate=%s already=%s sign=%s mail=%s\n' \
             "$(date -u +%FT%TZ)" \
-            "${{ github.event_name }}" \
-            "${{ steps.gate.outputs.run }}" \
-            "${{ steps.sign.outcome }}" > .state/last-run.txt
+            "${GITHUB_EVENT_NAME}" \
+            "${GATE_RUN:-none}" \
+            "${GATE_ALREADY:-none}" \
+            "${SIGN_OUTCOME:-none}" \
+            "${MAIL_OUTCOME:-none}" > .state/last-run.txt
+
+          {
+            echo "### 本次执行流水"
+            echo ""
+            echo "| 环节 | 结果 |"
+            echo "| --- | --- |"
+            echo "| 今天是否已有成功运行 | \`${GATE_ALREADY:-none}\` |"
+            echo "| 是否执行签到 | \`${GATE_RUN:-none}\` |"
+            echo "| 签到结果 | \`${SIGN_OUTCOME:-none}\` |"
+            echo "| 邮件 | \`${MAIL_OUTCOME:-none}\` |"
+          } >> "${GITHUB_STEP_SUMMARY}"
+
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .state/last-run.txt
+          git add .state
           git diff --staged --quiet && exit 0
           git commit -m "chore: heartbeat $(date -u +%F)"
           git push "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" "HEAD:${GITHUB_REF_NAME}"
